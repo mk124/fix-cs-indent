@@ -214,3 +214,54 @@ fn missing_semicolon_exits_zero_no_change() {
     e.run(&path).assert_exit_0();
     assert_eq!(read(&path), src);
 }
+
+// `#if/#else/#endif` spanning an array initializer is valid C# that tree-sitter-c-sharp
+// fails to parse. A blank line in an unrelated, well-formed method body must
+// still be fixed — we should not abandon the whole file just because one local
+// region trips the parser. The class-body blank stays untouched because its
+// container (`declaration_list`) has a parse error somewhere in its subtree.
+#[test]
+fn preproc_in_array_init_does_not_block_unrelated_fix() {
+    let e = Env::new();
+    let path = e.write("c.cs", &cs(indoc! {r#"
+        public static class C
+        {
+            static readonly string[] Paths =
+            {
+                #if UNITY_EDITOR_WIN
+                @"C:\p4.exe",
+                #else
+                "/usr/bin/p4",
+                #endif
+            };
+
+            static string Resolve()
+            {
+                string name = "p4";
+
+                return name;
+            }
+        }
+    "#}));
+    e.run(&path).assert_exit_0();
+    assert_eq!(read(&path), cs(indoc! {r#"
+        public static class C
+        {
+            static readonly string[] Paths =
+            {
+                #if UNITY_EDITOR_WIN
+                @"C:\p4.exe",
+                #else
+                "/usr/bin/p4",
+                #endif
+            };
+
+            static string Resolve()
+            {
+                string name = "p4";
+        ········
+                return name;
+            }
+        }
+    "#}));
+}

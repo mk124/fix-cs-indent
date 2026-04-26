@@ -61,11 +61,6 @@ fn run() {
         return;
     };
 
-    if tree.root_node().has_error() {
-        log::event("skip-has-error", Some(&file_path));
-        return;
-    }
-
     let danger = danger::collect(&tree);
 
     let new_body = match fix::fix_blank_lines(body, &tree, &danger) {

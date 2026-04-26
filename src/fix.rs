@@ -46,7 +46,16 @@ pub fn fix_blank_lines(body: &[u8], tree: &Tree, danger: &[Interval]) -> FixOutc
         if range_overlaps_any(danger, line.content_start, line.full_end) {
             continue;
         }
-        let chosen: Vec<u8> = match ast_scope_indent(root, body, line.content_start) {
+        // Skip blank lines whose enclosing container subtree contains any parse
+        // error or missing node. Replaces the old whole-file `has_error` gate:
+        // a tree-sitter-c-sharp limitation in one region (e.g. `#if/#endif`
+        // spanning an array initializer — valid C# the parser doesn't model)
+        // shouldn't abandon unrelated, well-formed regions.
+        let container = enclosing_container(root, line.content_start);
+        if container.is_some_and(|c| c.has_error()) {
+            continue;
+        }
+        let chosen: Vec<u8> = match container.and_then(|c| first_member_indent(c, body)) {
             Some(ws) => ws.to_vec(),
             None => match heuristic_indent(&lines, idx, danger) {
                 Some(ws) => ws.to_vec(),
@@ -72,11 +81,6 @@ pub fn fix_blank_lines(body: &[u8], tree: &Tree, danger: &[Interval]) -> FixOutc
         }
     }
     FixOutcome::Changed(out)
-}
-
-fn ast_scope_indent<'a>(root: Node<'a>, body: &'a [u8], pos: usize) -> Option<&'a [u8]> {
-    let container = enclosing_container(root, pos)?;
-    first_member_indent(container, body)
 }
 
 fn enclosing_container<'a>(root: Node<'a>, pos: usize) -> Option<Node<'a>> {
