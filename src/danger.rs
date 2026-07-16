@@ -16,13 +16,11 @@ pub fn collect(tree: &Tree) -> Vec<Interval> {
     out.sort_by_key(|iv| iv.start);
     let mut merged: Vec<Interval> = Vec::with_capacity(out.len());
     for iv in out {
-        if let Some(last) = merged.last_mut() {
-            if iv.start <= last.end {
-                if iv.end > last.end {
-                    last.end = iv.end;
-                }
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && iv.start <= last.end
+        {
+            last.end = last.end.max(iv.end);
+            continue;
         }
         merged.push(iv);
     }
@@ -72,27 +70,14 @@ fn is_danger(node: &Node) -> bool {
 }
 
 pub fn byte_in_any(intervals: &[Interval], byte: usize) -> bool {
-    intervals
-        .binary_search_by(|iv| {
-            if byte < iv.start {
-                std::cmp::Ordering::Greater
-            } else if byte >= iv.end {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
+    let index = intervals.partition_point(|iv| iv.end <= byte);
+    intervals.get(index).is_some_and(|iv| iv.start <= byte)
 }
 
 pub fn range_overlaps_any(intervals: &[Interval], start: usize, end: usize) -> bool {
     if start >= end {
         return byte_in_any(intervals, start);
     }
-    if byte_in_any(intervals, start) || byte_in_any(intervals, end - 1) {
-        return true;
-    }
-    intervals
-        .iter()
-        .any(|iv| iv.start >= start && iv.start < end)
+    let index = intervals.partition_point(|iv| iv.end <= start);
+    intervals.get(index).is_some_and(|iv| iv.start < end)
 }

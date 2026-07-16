@@ -7,8 +7,12 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn event(action: &str, path: Option<&Path>) {
-    let Ok(log_path) = env::var("FIX_CS_INDENT_LOG") else { return };
-    if log_path.is_empty() { return; }
+    let Ok(log_path) = env::var("FIX_CS_INDENT_LOG") else {
+        return;
+    };
+    if log_path.is_empty() {
+        return;
+    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -18,7 +22,11 @@ pub fn event(action: &str, path: Option<&Path>) {
     if let Some(parent) = Path::new(&log_path).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }

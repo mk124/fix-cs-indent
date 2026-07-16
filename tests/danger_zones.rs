@@ -1,31 +1,16 @@
 // Tests that strings, comments, and parse-error regions are preserved untouched.
 
 mod common;
-use common::{Env, cs, read};
+use common::{assert_file_after_run, cs};
 use indoc::indoc;
 
 // ---------- string and comment danger zones ----------
 
 #[test]
-fn verbatim_string_blank_untouched() {
-    let e = Env::new();
-    let src = cs(indoc! {r#"
-        class B
-        {
-            string s = @"line1
-
-        line3";
-        }
-    "#});
-    let path = e.write("b.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
-}
-
-#[test]
 fn raw_string_blank_untouched() {
-    let e = Env::new();
-    let src = cs(indoc! {r#"
+    assert_file_after_run(
+        "b.cs",
+        &cs(indoc! {r#"
         class B
         {
             string s = """
@@ -33,37 +18,72 @@ fn raw_string_blank_untouched() {
 
         line3
         """;
+
+            int x;
         }
-    "#});
-    let path = e.write("b.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
+    "#}),
+        &cs(indoc! {r#"
+        class B
+        {
+            string s = """
+        line1
+
+        line3
+        """;
+        ····
+            int x;
+        }
+    "#}),
+    );
 }
 
 #[test]
 fn interpolated_verbatim_blank_untouched() {
-    let e = Env::new();
-    let src = cs(indoc! {r#"
+    assert_file_after_run(
+        "b.cs",
+        &cs(indoc! {r#"
         class B
         {
             void F(int p)
             {
-                var s = $@"x{p}
+                var first = $@"x{p}
 
         end";
+                var second = @$"x{p}
+
+        end";
+
+                Use(p);
             }
+            void Use(int value) { }
         }
-    "#});
-    let path = e.write("b.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
+    "#}),
+        &cs(indoc! {r#"
+        class B
+        {
+            void F(int p)
+            {
+                var first = $@"x{p}
+
+        end";
+                var second = @$"x{p}
+
+        end";
+        ········
+                Use(p);
+            }
+            void Use(int value) { }
+        }
+    "#}),
+    );
 }
 
 #[test]
 fn raw_interpolated_string_blank_untouched() {
     // C# 11 raw interpolated string literal $""" ... """.
-    let e = Env::new();
-    let src = cs(indoc! {r#"
+    assert_file_after_run(
+        "b.cs",
+        &cs(indoc! {r#"
         class B
         {
             void F(int p)
@@ -71,58 +91,64 @@ fn raw_interpolated_string_blank_untouched() {
                 var s = $"""x{p}
 
         end""";
-            }
-        }
-    "#});
-    let path = e.write("b.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
-}
 
-#[test]
-fn interpolated_verbatim_at_dollar_blank_untouched() {
-    // Alternate ordering: @$"..." instead of $@"..."
-    let e = Env::new();
-    let src = cs(indoc! {r#"
+                Use(p);
+            }
+            void Use(int value) { }
+        }
+    "#}),
+        &cs(indoc! {r#"
         class B
         {
             void F(int p)
             {
-                var s = @$"x{p}
+                var s = $"""x{p}
 
-        end";
+        end""";
+        ········
+                Use(p);
             }
+            void Use(int value) { }
         }
-    "#});
-    let path = e.write("b.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
+    "#}),
+    );
 }
 
 #[test]
 fn block_comment_blank_untouched() {
-    let e = Env::new();
-    let src = cs(indoc! {"
+    assert_file_after_run(
+        "b.cs",
+        &cs(indoc! {"
         class B
         {
+            int x;
+
+            int y;
             /* line1
 
             line3 */
-            int x;
         }
-    "});
-    let path = e.write("b.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
+    "}),
+        &cs(indoc! {"
+        class B
+        {
+            int x;
+        ····
+            int y;
+            /* line1
+
+            line3 */
+        }
+    "}),
+    );
 }
 
 #[test]
 fn blank_before_doc_comment_uses_method_body_indent() {
-    // `/// summary` lines are themselves comment nodes, so the blank-line
-    // search skips them. Both the prev (`int x;`) and the next non-comment
-    // (`void F() {}`) are at indent 4 — blank gets 4 spaces.
-    let e = Env::new();
-    let path = e.write("a.cs", &cs(indoc! {"
+    // Documentation comments do not determine the surrounding blank's indent.
+    assert_file_after_run(
+        "a.cs",
+        &cs(indoc! {"
         class A
         {
             int x;
@@ -130,9 +156,8 @@ fn blank_before_doc_comment_uses_method_body_indent() {
             /// <summary>Doc</summary>
             void F() {}
         }
-    "}));
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), cs(indoc! {"
+    "}),
+        &cs(indoc! {"
         class A
         {
             int x;
@@ -140,90 +165,148 @@ fn blank_before_doc_comment_uses_method_body_indent() {
             /// <summary>Doc</summary>
             void F() {}
         }
-    "}));
+    "}),
+    );
 }
 
 #[test]
 fn blank_after_block_comment_is_fixed() {
-    let e = Env::new();
-    let path = e.write("b.cs", &cs(indoc! {"
+    assert_file_after_run(
+        "b.cs",
+        &cs(indoc! {"
         class B
         {
             /* c */
 
             int y;
         }
-    "}));
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), cs(indoc! {"
+    "}),
+        &cs(indoc! {"
         class B
         {
             /* c */
         ····
             int y;
         }
-    "}));
+    "}),
+    );
 }
 
-// ---------- ERROR gate (any syntax error => exit 0, no change) ----------
+// ---------- parse-error regions ----------
 
 #[test]
 fn unclosed_verbatim_string_exits_zero_no_change() {
-    let e = Env::new();
-    let src = cs(indoc! {r#"
+    assert_file_after_run(
+        "c.cs",
+        &cs(indoc! {r#"
+        class Valid
+        {
+            int x;
+
+            int y;
+        }
         class C
         {
             string s = @"oops
 
             int x;
         }
-    "#});
-    let path = e.write("c.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
+    "#}),
+        &cs(indoc! {r#"
+        class Valid
+        {
+            int x;
+        ····
+            int y;
+        }
+        class C
+        {
+            string s = @"oops
+
+            int x;
+        }
+    "#}),
+    );
 }
 
 #[test]
 fn unclosed_block_comment_exits_zero_no_change() {
-    let e = Env::new();
-    let src = cs(indoc! {"
+    assert_file_after_run(
+        "c.cs",
+        &cs(indoc! {"
+        class Valid
+        {
+            int x;
+
+            int y;
+        }
         class C
         {
             /* oops
 
             int x;
         }
-    "});
-    let path = e.write("c.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
+    "}),
+        &cs(indoc! {"
+        class Valid
+        {
+            int x;
+        ····
+            int y;
+        }
+        class C
+        {
+            /* oops
+
+            int x;
+        }
+    "}),
+    );
 }
 
 #[test]
 fn missing_semicolon_exits_zero_no_change() {
-    let e = Env::new();
-    let src = cs(indoc! {"
+    assert_file_after_run(
+        "c.cs",
+        &cs(indoc! {"
+        class Valid
+        {
+            int x;
+
+            int y;
+        }
         class C
         {
             int x
 
             int y;
         }
-    "});
-    let path = e.write("c.cs", &src);
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), src);
+    "}),
+        &cs(indoc! {"
+        class Valid
+        {
+            int x;
+        ····
+            int y;
+        }
+        class C
+        {
+            int x
+
+            int y;
+        }
+    "}),
+    );
 }
 
-// `#if/#else/#endif` spanning an array initializer is valid C# that tree-sitter-c-sharp
-// fails to parse. A blank line in an unrelated, well-formed method body must
-// still be fixed — we should not abandon the whole file just because one local
-// region trips the parser. The class-body blank stays untouched because its
-// container (`declaration_list`) has a parse error somewhere in its subtree.
+// Tree-sitter cannot parse `#if/#else/#endif` spanning this array initializer.
+// Blanks in the affected class region stay untouched, while a blank inside the
+// unrelated well-formed method is still repaired.
 #[test]
 fn preproc_in_array_init_does_not_block_unrelated_fix() {
-    let e = Env::new();
-    let path = e.write("c.cs", &cs(indoc! {r#"
+    assert_file_after_run(
+        "c.cs",
+        &cs(indoc! {r#"
         public static class C
         {
             static readonly string[] Paths =
@@ -242,9 +325,8 @@ fn preproc_in_array_init_does_not_block_unrelated_fix() {
                 return name;
             }
         }
-    "#}));
-    e.run(&path).assert_exit_0();
-    assert_eq!(read(&path), cs(indoc! {r#"
+    "#}),
+        &cs(indoc! {r#"
         public static class C
         {
             static readonly string[] Paths =
@@ -263,5 +345,6 @@ fn preproc_in_array_init_does_not_block_unrelated_fix() {
                 return name;
             }
         }
-    "#}));
+    "#}),
+    );
 }

@@ -16,28 +16,17 @@ struct LineInfo<'a> {
     newline: &'a [u8],
 }
 
-// tree-sitter-c-sharp node kinds that can directly contain statements or
-// members and whose "first member row" determines blank-line indentation.
-const CONTAINER_KINDS: &[&str] = &[
-    "block",
-    "declaration_list",
-    "enum_member_declaration_list",
-    "accessor_list",
-    "switch_body",
-    "switch_section",
-    "initializer_expression",
-    "anonymous_object_creation_expression",
-    "argument_list",
-    "bracketed_argument_list",
-    "collection_expression",
-    "property_pattern_clause",
-    "switch_expression",
-    "attribute_list",
-];
+#[derive(Clone, Copy)]
+struct Container<'a> {
+    node: Node<'a>,
+    content_start: usize,
+    content_end: usize,
+    prefer_next: bool,
+}
 
 pub fn fix_blank_lines(body: &[u8], tree: &Tree, danger: &[Interval]) -> FixOutcome {
     let lines = split_lines(body);
-    let mut new_indent: Vec<Option<Vec<u8>>> = vec![None; lines.len()];
+    let mut new_indent: Vec<Option<&[u8]>> = vec![None; lines.len()];
     let root = tree.root_node();
     for (idx, line) in lines.iter().enumerate() {
         if !is_blank(line.content) {
@@ -46,21 +35,29 @@ pub fn fix_blank_lines(body: &[u8], tree: &Tree, danger: &[Interval]) -> FixOutc
         if range_overlaps_any(danger, line.content_start, line.full_end) {
             continue;
         }
-        // Skip blank lines whose enclosing container subtree contains any parse
-        // error or missing node. Replaces the old whole-file `has_error` gate:
-        // a tree-sitter-c-sharp limitation in one region (e.g. `#if/#endif`
-        // spanning an array initializer — valid C# the parser doesn't model)
-        // shouldn't abandon unrelated, well-formed regions.
+        // Skip blank lines whose enclosing container contains a parse error or
+        // missing node. A parser limitation in one region must not prevent
+        // repairs in unrelated, well-formed regions.
         let container = enclosing_container(root, line.content_start);
-        if container.is_some_and(|c| c.has_error()) {
+        if container.is_some_and(|c| c.node.has_error()) {
             continue;
         }
-        let chosen: Vec<u8> = match container.and_then(|c| first_member_indent(c, body)) {
-            Some(ws) => ws.to_vec(),
-            None => match heuristic_indent(&lines, idx, danger) {
-                Some(ws) => ws.to_vec(),
-                None => continue,
-            },
+        let next_indent = || {
+            find_next_nonblank_indent(
+                &lines,
+                idx,
+                danger,
+                container.map_or(body.len(), |c| c.content_end),
+            )
+        };
+        let Some(chosen) = (match container {
+            Some(container) if container.prefer_next => {
+                next_indent().or_else(|| first_member_indent(container, body))
+            }
+            Some(container) => first_member_indent(container, body).or_else(next_indent),
+            None => next_indent(),
+        }) else {
+            continue;
         };
         if chosen.is_empty() || chosen == line.content {
             continue;
@@ -70,10 +67,10 @@ pub fn fix_blank_lines(body: &[u8], tree: &Tree, danger: &[Interval]) -> FixOutc
     if new_indent.iter().all(Option::is_none) {
         return FixOutcome::NoChange;
     }
-    let extra: usize = new_indent.iter().flatten().map(Vec::len).sum();
+    let extra: usize = new_indent.iter().flatten().map(|indent| indent.len()).sum();
     let mut out = Vec::with_capacity(body.len() + extra);
     for (idx, line) in lines.iter().enumerate() {
-        if let Some(ws) = &new_indent[idx] {
+        if let Some(ws) = new_indent[idx] {
             out.extend_from_slice(ws);
             out.extend_from_slice(line.newline);
         } else {
@@ -83,69 +80,126 @@ pub fn fix_blank_lines(body: &[u8], tree: &Tree, danger: &[Interval]) -> FixOutc
     FixOutcome::Changed(out)
 }
 
-fn enclosing_container<'a>(root: Node<'a>, pos: usize) -> Option<Node<'a>> {
+fn enclosing_container<'a>(root: Node<'a>, pos: usize) -> Option<Container<'a>> {
     let mut node = root.named_descendant_for_byte_range(pos, pos)?;
+    // Delimiterless syntax still provides a useful local indentation scope.
+    // Keep its smallest node, but climb to the nearest structural container
+    // so a parse error in that enclosing scope still blocks the repair.
+    let mut local_container = None;
     loop {
-        if CONTAINER_KINDS.contains(&node.kind()) {
-            return Some(node);
+        if let Some(container) = as_container(node, pos) {
+            return if container.node.has_error() {
+                Some(container)
+            } else {
+                local_container.or(Some(container))
+            };
+        }
+        if local_container.is_none() && node.start_byte() < pos && pos < node.end_byte() {
+            local_container = Some(Container {
+                node,
+                content_start: node.start_byte(),
+                content_end: node.end_byte(),
+                prefer_next: true,
+            });
         }
         node = node.parent()?;
     }
 }
 
-fn first_member_indent<'a>(container: Node<'_>, body: &'a [u8]) -> Option<&'a [u8]> {
-    let container_row = container.start_position().row;
-    let mut cursor = container.walk();
-    for child in container.named_children(&mut cursor) {
+fn as_container(node: Node<'_>, pos: usize) -> Option<Container<'_>> {
+    let bounds = match node.kind() {
+        "compilation_unit" | "switch_section" => Some((node.start_byte(), node.end_byte())),
+        "type_argument_list" | "type_parameter_list" => delimiter_bounds(node, pos, "<", ">"),
+        _ => [("{", "}"), ("(", ")"), ("[", "]")]
+            .into_iter()
+            .find_map(|(open, close)| delimiter_bounds(node, pos, open, close)),
+    }?;
+
+    Some(Container {
+        node,
+        content_start: bounds.0,
+        content_end: bounds.1,
+        prefer_next: false,
+    })
+}
+
+fn delimiter_bounds(node: Node<'_>, pos: usize, open: &str, close: &str) -> Option<(usize, usize)> {
+    let children = 0..node.child_count() as u32;
+    let opening = children
+        .clone()
+        .filter_map(|index| node.child(index))
+        .find(|child| !child.is_named() && child.kind() == open);
+    let closing = children
+        .rev()
+        .filter_map(|index| node.child(index))
+        .find(|child| !child.is_named() && child.kind() == close);
+
+    opening
+        .zip(closing)
+        .map(|(opening, closing)| (opening.end_byte(), closing.start_byte()))
+        .filter(|&(start, end)| start <= pos && pos <= end)
+}
+
+fn first_member_indent<'a>(container: Container<'_>, body: &'a [u8]) -> Option<&'a [u8]> {
+    let node = container.node;
+    let container_row = node.start_position().row;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.start_byte() < container.content_start {
+            continue;
+        }
+        if child.start_byte() >= container.content_end {
+            break;
+        }
+        if child.kind() == "comment" {
+            continue;
+        }
         if child.kind().starts_with("preproc_") {
+            if let Some(indent) = first_member_indent(
+                Container {
+                    node: child,
+                    ..container
+                },
+                body,
+            ) {
+                return Some(indent);
+            }
             continue;
         }
-        if child.start_position().row == container_row {
+        if node.kind() != "compilation_unit" && child.start_position().row == container_row {
             continue;
         }
-        // labeled_statement grammar is [identifier, statement]; the label's
-        // column is shallower than the body's, so unwrap to the inner
-        // statement (named_child(1)) to get the body indent.
-        let representative = if child.kind() == "labeled_statement" {
-            child.named_child(1).unwrap_or(child)
-        } else {
-            child
-        };
+        // A label is shallower than its body. When a surrounding scope uses a
+        // labeled statement as its first member, follow nested labels to the
+        // statement they introduce. Within a label, retain the next label's
+        // own indentation.
+        let mut representative = child;
+        if node.kind() != "labeled_statement" {
+            while representative.kind() == "labeled_statement" {
+                let Some(body) = representative.named_child(1) else {
+                    break;
+                };
+                representative = body;
+            }
+        }
         return Some(leading_ws_of_line(body, representative.start_byte()));
     }
     None
 }
 
 fn leading_ws_of_line(body: &[u8], pos: usize) -> &[u8] {
-    let mut line_start = pos;
-    while line_start > 0 && body[line_start - 1] != b'\n' {
-        line_start -= 1;
-    }
-    let mut end = line_start;
-    while end < body.len() && (body[end] == b' ' || body[end] == b'\t') {
-        end += 1;
-    }
-    &body[line_start..end]
-}
-
-fn heuristic_indent<'a>(
-    lines: &'a [LineInfo<'a>],
-    idx: usize,
-    danger: &[Interval],
-) -> Option<&'a [u8]> {
-    let next_ws = find_next_nonblank_indent(lines, idx, danger);
-    let prev_ws = find_prev_nonblank_indent(lines, idx, danger);
-    match (prev_ws, next_ws) {
-        (Some(p), Some(n)) if p.len() > n.len() => Some(p),
-        (_, Some(n)) => Some(n),
-        (_, None) => None,
-    }
+    let line_start = body[..pos]
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    leading_ws(&body[line_start..])
 }
 
 fn find_next_nonblank_indent<'a>(
     lines: &'a [LineInfo<'a>],
     idx: usize,
     danger: &[Interval],
+    content_end: usize,
 ) -> Option<&'a [u8]> {
     let mut j = idx + 1;
     while j < lines.len() {
@@ -154,34 +208,18 @@ fn find_next_nonblank_indent<'a>(
             j += 1;
             continue;
         }
-        if byte_in_any(danger, cand.content_start) {
+        let indent = leading_ws(cand.content);
+        let content_start = cand.content_start + indent.len();
+        if content_start > content_end {
+            return None;
+        }
+        if cand.content.get(indent.len()) == Some(&b'#') || byte_in_any(danger, content_start) {
             j += 1;
             continue;
         }
-        return Some(leading_ws(cand.content));
+        return Some(indent);
     }
     None
-}
-
-fn find_prev_nonblank_indent<'a>(
-    lines: &'a [LineInfo<'a>],
-    idx: usize,
-    danger: &[Interval],
-) -> Option<&'a [u8]> {
-    if idx == 0 {
-        return None;
-    }
-    let mut j = idx - 1;
-    loop {
-        let cand = &lines[j];
-        if !is_blank(cand.content) && !byte_in_any(danger, cand.content_start) {
-            return Some(leading_ws(cand.content));
-        }
-        if j == 0 {
-            return None;
-        }
-        j -= 1;
-    }
 }
 
 fn split_lines(body: &[u8]) -> Vec<LineInfo<'_>> {
@@ -217,9 +255,6 @@ fn split_lines(body: &[u8]) -> Vec<LineInfo<'_>> {
             newline,
         });
         i = full_end;
-        if i == line_start {
-            break;
-        }
     }
     lines
 }

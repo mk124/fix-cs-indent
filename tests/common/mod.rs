@@ -30,10 +30,6 @@ impl Env {
     }
 
     pub fn run(&self, file: &Path) -> Outcome {
-        self.run_with(file, &[])
-    }
-
-    pub fn run_with(&self, file: &Path, extra_env: &[(&str, &str)]) -> Outcome {
         let json = format!(
             r#"{{"tool_name":"Edit","tool_input":{{"file_path":"{}"}}}}"#,
             file.display()
@@ -41,9 +37,6 @@ impl Env {
         let mut cmd = Command::new(bin_path());
         cmd.env_clear();
         cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
-        for (k, v) in extra_env {
-            cmd.env(k, v);
-        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -66,7 +59,6 @@ impl Env {
 
 pub struct Outcome {
     pub status: i32,
-    #[allow(dead_code)]
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
@@ -81,13 +73,27 @@ impl Outcome {
             String::from_utf8_lossy(&self.stderr)
         );
     }
-    pub fn assert_no_stderr(&self) {
+    pub fn assert_silent(&self) {
+        assert!(
+            self.stdout.is_empty(),
+            "expected no stdout, got: {:?}",
+            String::from_utf8_lossy(&self.stdout)
+        );
         assert!(
             self.stderr.is_empty(),
             "expected no stderr, got: {:?}",
             String::from_utf8_lossy(&self.stderr)
         );
     }
+}
+
+pub fn assert_file_after_run(name: &str, input: &[u8], expected: &[u8]) -> Outcome {
+    let env = Env::new();
+    let path = env.write(name, input);
+    let outcome = env.run(&path);
+    outcome.assert_exit_0();
+    assert_eq!(read(&path), expected);
+    outcome
 }
 
 pub fn read(path: &Path) -> Vec<u8> {
